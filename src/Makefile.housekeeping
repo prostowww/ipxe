@@ -949,9 +949,8 @@ CLEANUP		+= $(BIN)/NIC	# Doesn't match the $(BIN)/*.* pattern
 
 # Select drivers to be included in the all-drivers build
 #
-DRIVERS		= $(DRIVERS_net) $(DRIVERS_infiniband) \
+DRIVERS_ipxe	= $(DRIVERS_net) $(DRIVERS_infiniband) \
 		  $(DRIVERS_xen) $(DRIVERS_hyperv)
-DRIVERS_ipxe	= $(DRIVERS)
 
 # Analyse a target name (e.g. "bin/dfe538--prism2_pci.rom.tmp") and
 # derive the variables:
@@ -1006,7 +1005,7 @@ TGT_LD_ENTRY	= _$(TGT_PREFIX)_start
 #		  --defsym pci_vendor=0x1186 --defsym pci_device=0x1300")
 #
 TGT_LD_FLAGS	= $(foreach SYM,$(TGT_LD_ENTRY) $(TGT_LD_DRIVERS) \
-		    $(TGT_LD_DEVLIST) obj_config,\
+		    $(TGT_LD_DEVLIST) obj_config obj_config_$(PLATFORM),\
 		    -u $(SYM) --defsym check_$(SYM)=$(SYM) ) \
 		  $(patsubst %,--defsym %,$(TGT_LD_IDS)) \
 		  -e $(TGT_LD_ENTRY)
@@ -1302,7 +1301,7 @@ CLEANUP += $(ZBIN)
 ELF2EFI_CFLAGS	:= -I$(BINUTILS_DIR)/include -I$(BFD_DIR)/include \
 		   -I$(ZLIB_DIR)/include -idirafter include
 ELF2EFI_LDFLAGS	:= -L$(BINUTILS_DIR)/lib -L$(BFD_DIR)/lib -L$(ZLIB_DIR)/lib \
-		   -lbfd -ldl -liberty -lz -Wl,--no-warn-search-mismatch
+		   -lbfd -ldl -lz -Wl,--no-warn-search-mismatch
 
 $(ELF2EFI32) : util/elf2efi.c $(MAKEDEPS)
 	$(QM)$(ECHO) "  [HOSTCC] $@"

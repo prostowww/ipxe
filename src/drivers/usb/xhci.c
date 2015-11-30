@@ -743,6 +743,8 @@ static unsigned int xhci_port_protocol ( struct xhci_device *xhci,
 					xhci_speed_name ( psi ) );
 			}
 		}
+		if ( xhci->quirks & XHCI_BAD_PSIV )
+			DBGC2 ( xhci, " (ignored)" );
 		DBGC2 ( xhci, "\n" );
 	}
 
@@ -800,7 +802,7 @@ static int xhci_port_speed ( struct xhci_device *xhci, unsigned int port,
 	psic = XHCI_SUPPORTED_PORTS_PSIC ( ports );
 
 	/* Use the default mappings if applicable */
-	if ( ! psic ) {
+	if ( ( psic == 0 ) || ( xhci->quirks & XHCI_BAD_PSIV ) ) {
 		switch ( psiv ) {
 		case XHCI_SPEED_LOW :	return USB_SPEED_LOW;
 		case XHCI_SPEED_FULL :	return USB_SPEED_FULL;
@@ -857,14 +859,14 @@ static int xhci_port_psiv ( struct xhci_device *xhci, unsigned int port,
 	psic = XHCI_SUPPORTED_PORTS_PSIC ( ports );
 
 	/* Use the default mappings if applicable */
-	if ( ! psic ) {
+	if ( ( psic == 0 ) || ( xhci->quirks & XHCI_BAD_PSIV ) ) {
 		switch ( speed ) {
 		case USB_SPEED_LOW :	return XHCI_SPEED_LOW;
 		case USB_SPEED_FULL :	return XHCI_SPEED_FULL;
 		case USB_SPEED_HIGH :	return XHCI_SPEED_HIGH;
 		case USB_SPEED_SUPER :	return XHCI_SPEED_SUPER;
 		default:
-			DBGC ( xhci, "XHCI %s-%d non-standad speed %d\n",
+			DBGC ( xhci, "XHCI %s-%d non-standard speed %d\n",
 			       xhci->name, port, speed );
 			return -ENOTSUP;
 		}
@@ -2540,20 +2542,44 @@ static int xhci_endpoint_message ( struct usb_endpoint *ep,
 }
 
 /**
+ * Calculate number of TRBs
+ *
+ * @v len		Length of data
+ * @v zlp		Append a zero-length packet
+ * @ret count		Number of transfer descriptors
+ */
+static unsigned int xhci_endpoint_count ( size_t len, int zlp ) {
+	unsigned int count;
+
+	/* Split into 64kB TRBs */
+	count = ( ( len + XHCI_MTU - 1 ) / XHCI_MTU );
+
+	/* Append a zero-length TRB if applicable */
+	if ( zlp || ( count == 0 ) )
+		count++;
+
+	return count;
+}
+
+/**
  * Enqueue stream transfer
  *
  * @v ep		USB endpoint
  * @v iobuf		I/O buffer
- * @v terminate		Terminate using a short packet
+ * @v zlp		Append a zero-length packet
  * @ret rc		Return status code
  */
 static int xhci_endpoint_stream ( struct usb_endpoint *ep,
-				  struct io_buffer *iobuf, int terminate ) {
+				  struct io_buffer *iobuf, int zlp ) {
 	struct xhci_endpoint *endpoint = usb_endpoint_get_hostdata ( ep );
-	union xhci_trb trbs[ 1 /* Normal */ + 1 /* Possible zero-length */ ];
+	void *data = iobuf->data;
+	size_t len = iob_len ( iobuf );
+	unsigned int count = xhci_endpoint_count ( len, zlp );
+	union xhci_trb trbs[count];
 	union xhci_trb *trb = trbs;
 	struct xhci_trb_normal *normal;
-	size_t len = iob_len ( iobuf );
+	unsigned int i;
+	size_t trb_len;
 	int rc;
 
 	/* Profile stream transfers */
@@ -2561,20 +2587,30 @@ static int xhci_endpoint_stream ( struct usb_endpoint *ep,
 
 	/* Construct normal TRBs */
 	memset ( &trbs, 0, sizeof ( trbs ) );
-	normal = &(trb++)->normal;
-	normal->data = cpu_to_le64 ( virt_to_phys ( iobuf->data ) );
-	normal->len = cpu_to_le32 ( len );
-	normal->type = XHCI_TRB_NORMAL;
-	if ( terminate && ( ( len & ( ep->mtu - 1 ) ) == 0 ) ) {
-		normal->flags = XHCI_TRB_CH;
-		normal = &(trb++)->normal;
+	for ( i = 0 ; i < count ; i ++ ) {
+
+		/* Calculate TRB length */
+		trb_len = XHCI_MTU;
+		if ( trb_len > len )
+			trb_len = len;
+
+		/* Construct normal TRB */
+		normal = &trb->normal;
+		normal->data = cpu_to_le64 ( virt_to_phys ( data ) );
+		normal->len = cpu_to_le32 ( trb_len );
 		normal->type = XHCI_TRB_NORMAL;
+		normal->flags = XHCI_TRB_CH;
+
+		/* Move to next TRB */
+		data += trb_len;
+		len -= trb_len;
+		trb++;
 	}
-	normal->flags = XHCI_TRB_IOC;
+	trb[-1].normal.flags = XHCI_TRB_IOC;
 
 	/* Enqueue TRBs */
 	if ( ( rc = xhci_enqueue_multi ( &endpoint->ring, iobuf, trbs,
-					 ( trb - trbs ) ) ) != 0 )
+					 count ) ) != 0 )
 		return rc;
 
 	/* Ring the doorbell */
@@ -2622,6 +2658,7 @@ static int xhci_device_open ( struct usb_device *usb ) {
 		rc = id;
 		goto err_enable_slot;
 	}
+	assert ( ( id > 0 ) && ( ( unsigned int ) id <= xhci->slots ) );
 	assert ( xhci->slot[id] == NULL );
 
 	/* Allocate and initialise structure */
@@ -2761,7 +2798,7 @@ static int xhci_bus_open ( struct usb_bus *bus ) {
 	int rc;
 
 	/* Allocate device slot array */
-	xhci->slot = zalloc ( xhci->slots * sizeof ( xhci->slot[0] ) );
+	xhci->slot = zalloc ( ( xhci->slots + 1 ) * sizeof ( xhci->slot[0] ) );
 	if ( ! xhci->slot ) {
 		rc = -ENOMEM;
 		goto err_slot_alloc;
@@ -2813,7 +2850,7 @@ static void xhci_bus_close ( struct usb_bus *bus ) {
 
 	/* Sanity checks */
 	assert ( xhci->slot != NULL );
-	for ( i = 0 ; i < xhci->slots ; i++ )
+	for ( i = 0 ; i <= xhci->slots ; i++ )
 		assert ( xhci->slot[i] == NULL );
 
 	xhci_stop ( xhci );
@@ -3196,6 +3233,7 @@ static int xhci_probe ( struct pci_device *pci ) {
 		goto err_alloc;
 	}
 	xhci->name = pci->dev.name;
+	xhci->quirks = pci->id->driver_data;
 
 	/* Fix up PCI device */
 	adjust_pci_device ( pci );
@@ -3217,7 +3255,7 @@ static int xhci_probe ( struct pci_device *pci ) {
 	xhci_legacy_claim ( xhci );
 
 	/* Fix Intel PCH-specific quirks, if applicable */
-	if ( pci->id->driver_data & XHCI_PCH )
+	if ( xhci->quirks & XHCI_PCH )
 		xhci_pch_fix ( xhci, pci );
 
 	/* Reset device */
@@ -3253,7 +3291,7 @@ static int xhci_probe ( struct pci_device *pci ) {
  err_alloc_bus:
 	xhci_reset ( xhci );
  err_reset:
-	if ( pci->id->driver_data & XHCI_PCH )
+	if ( xhci->quirks & XHCI_PCH )
 		xhci_pch_undo ( xhci, pci );
 	xhci_legacy_release ( xhci );
 	iounmap ( xhci->regs );
@@ -3275,7 +3313,7 @@ static void xhci_remove ( struct pci_device *pci ) {
 	unregister_usb_bus ( bus );
 	free_usb_bus ( bus );
 	xhci_reset ( xhci );
-	if ( pci->id->driver_data & XHCI_PCH )
+	if ( xhci->quirks & XHCI_PCH )
 		xhci_pch_undo ( xhci, pci );
 	xhci_legacy_release ( xhci );
 	iounmap ( xhci->regs );
@@ -3284,6 +3322,7 @@ static void xhci_remove ( struct pci_device *pci ) {
 
 /** XHCI PCI device IDs */
 static struct pci_device_id xhci_ids[] = {
+	PCI_ROM ( 0x8086, 0x9d2f, "xhci-skylake", "xHCI (Skylake)", ( XHCI_PCH | XHCI_BAD_PSIV ) ),
 	PCI_ROM ( 0x8086, 0xffff, "xhci-pch", "xHCI (Intel PCH)", XHCI_PCH ),
 	PCI_ROM ( 0xffff, 0xffff, "xhci", "xHCI", 0 ),
 };
