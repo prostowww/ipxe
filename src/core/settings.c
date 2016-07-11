@@ -1474,9 +1474,9 @@ struct setting * find_setting ( const char *name ) {
  * @v name		Name
  * @ret tag		Tag number, or 0 if not a valid number
  */
-static unsigned int parse_setting_tag ( const char *name ) {
+static unsigned long parse_setting_tag ( const char *name ) {
 	char *tmp = ( ( char * ) name );
-	unsigned int tag = 0;
+	unsigned long tag = 0;
 
 	while ( 1 ) {
 		tag = ( ( tag << 8 ) | strtoul ( tmp, &tmp, 0 ) );
@@ -2232,6 +2232,10 @@ static int format_busdevfn_setting ( const struct setting_type *type __unused,
 				     const void *raw, size_t raw_len, char *buf,
 				     size_t len ) {
 	unsigned long busdevfn;
+	unsigned int seg;
+	unsigned int bus;
+	unsigned int slot;
+	unsigned int func;
 	int check_len;
 
 	/* Extract numeric value */
@@ -2240,9 +2244,14 @@ static int format_busdevfn_setting ( const struct setting_type *type __unused,
 		return check_len;
 	assert ( check_len == ( int ) raw_len );
 
+	/* Extract PCI address components */
+	seg = PCI_SEG ( busdevfn );
+	bus = PCI_BUS ( busdevfn );
+	slot = PCI_SLOT ( busdevfn );
+	func = PCI_FUNC ( busdevfn );
+
 	/* Format value */
-	return snprintf ( buf, len, "%02lx:%02lx.%lx", PCI_BUS ( busdevfn ),
-			  PCI_SLOT ( busdevfn ), PCI_FUNC ( busdevfn ) );
+	return snprintf ( buf, len, "%04x:%02x:%02x.%x", seg, bus, slot, func );
 }
 
 /** PCI bus:dev.fn setting type */
